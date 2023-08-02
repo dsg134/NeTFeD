@@ -27,7 +27,7 @@ sweep_variable = 'detection_range' # Choose: IR_angle, RGB_angle, or distance (t
 step_size = 0.1
 min_value = 1
 max_value = 10
-# NOTE: If you choose IR_angle or RGB_angle, they will be in degrees, while distance will be in inches
+# NOTE: If you choose IR_angle or RGB_angle, they will be in degrees, while distance will be in inches, and detection_range will be in feet
 
 # Conversions
 IR_angle = math.radians(IR_angle) # radians
