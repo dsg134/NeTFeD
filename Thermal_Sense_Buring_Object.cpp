@@ -1,3 +1,7 @@
+// This is the processing code for the AMG8833
+// The largest pixel value from the interpolated pixel array output is considered the hottest point in the image
+// Using a piecewise probability estimation, the probability of a burning object being within frame is estimated
+
 #include <Wire.h>
 #include <Adafruit_AMG88xx.h>
 
