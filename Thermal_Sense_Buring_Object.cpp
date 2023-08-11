@@ -152,7 +152,7 @@ void loop() {
         Serial.print("Received Classification Value: ");
         Serial.println(receivedValue);
         Serial.print("Combined Probability: ");
-        Serial.println(receivedValue * thermalFireProbability); //maybe do a weighted probability instead???
+        Serial.println(0.7 * receivedValue + 0.3 * thermalFireProbability);
 
         //also send the x and y locations for the fire center
         //this is needed for triangulation --> for findRGB_x and findRGB_y
