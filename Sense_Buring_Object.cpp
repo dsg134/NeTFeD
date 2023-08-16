@@ -4,7 +4,7 @@
 Adafruit_AMG88xx amg;
 
 const int INPUT_SIZE = 8;
-const int OUTPUT_SIZE = 12; // Interpolate data by a factor of: OUTPUT_SIZE / INPUT_SIZE --> This number is limit with however much memory the MCU has
+const int OUTPUT_SIZE = 12; // Interpolate data by a factor of: OUTPUT_SIZE / INPUT_SIZE --> This number is limited with however much memory the MCU has
 
 // Pixel grid properties
 float pixels[AMG88xx_PIXEL_ARRAY_SIZE];
