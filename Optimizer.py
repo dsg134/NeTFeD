@@ -6,19 +6,19 @@ import numpy as np
 # ----------------
 
 # Camera 1 Information
-cam_1_angle = 30 # degrees off of back plate (relative to the FOV bisector)
+cam_1_angle = 39.44 # degrees off of back plate (relative to the FOV bisector)
 cam_1_FOV = 68 # degrees (field of view)
 
 # Camera 2 Information
-cam_2_angle = 30 # degrees off of back plate (relative to the FOV bisector)
+cam_2_angle = 39.44 # degrees off of back plate (relative to the FOV bisector)
 cam_2_FOV = 68 # degrees (field of view)
 
 # Thermal Array Information
 thermal_FOV = 60 # degrees (whose bisector is perpendicular to the back plate)
 
 # Distance and Range
-distance = 3 # inches between the IR sensor and RGB camera
-detection_range = 5.5 # feet away from midpoint of IR sensor and camera centers
+distance = 3.05 # inches between the IR sensor and RGB camera
+detection_range = 6 # feet away from midpoint of IR sensor and camera centers
 
 # NOTE: cam_1_FOV + cam_1_angle + cam_2_angle MUST be less than 180 degrees, otherwise the sensor FOVs won't overlap.
 
@@ -26,7 +26,7 @@ detection_range = 5.5 # feet away from midpoint of IR sensor and camera centers
 # ---------------------------------------
 
 # Variable Sweep Settings
-sweep_variable = 'distance' # Choose: cam_1_angle, cam_2_angle, or distance (the other measures are supposed to be known)
+sweep_variable = '' # Choose: cam_1_angle, cam_2_angle, or distance (the other measures are supposed to be known)
 step_size = 0.1
 min_value = 0
 max_value = 5
@@ -145,3 +145,7 @@ else:
 	# if thermal_area > detection_area --> warn user to re-optimize as usable space is being lost
 	if (thermal_area > estimate_detection_area(cam_1_angle, cam_1_FOV, cam_2_angle, cam_2_FOV, distance, detection_range)):
 		print("Re-optimize, the thermal sensor area is larger than the intersection of the camera areas.")
+
+	# Find the area of low confidence --> the area that is not seen by the thermal array
+	low_confidence_area = estimate_detection_area(cam_1_angle, cam_1_FOV, cam_2_angle, cam_2_FOV, distance, detection_range) - thermal_area
+	print("Low Confidence Area:", low_confidence_area, "Square Feet")
