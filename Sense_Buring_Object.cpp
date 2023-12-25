@@ -1,5 +1,13 @@
+#include <Fire-Detection-Training-4_inferencing.h>
+#include "edge-impulse-sdk/dsp/image/image.hpp"
+
+#include "esp_camera.h"
+
 #include <Wire.h>
 #include <Adafruit_AMG88xx.h>
+
+#define SDA_PIN 13 // Define your SDA pin
+#define SCL_PIN 2 // Define your SCL pin
 
 Adafruit_AMG88xx amg;
 
@@ -14,61 +22,111 @@ float output[OUTPUT_SIZE][OUTPUT_SIZE];
 float maxTemp;
 float findMax_x;
 float findMax_y;
+float fireProbability;
 
 // Probability of detecting fire via thermal imaging
 float thermalFireProbability;
 const float FIRE_THRESHOLD = 40;
 
-// Fire detection module properties
-#define RGB_res_X 1600
-#define RGB_res_Y 1200
-#define IR_res_X 12
-#define IR_res_Y 12
-#define seperation_distance 3 // inches
+// #define CAMERA_MODEL_ESP_EYE // Has PSRAM
+#define CAMERA_MODEL_AI_THINKER // Has PSRAM
 
-// Storage for recovered flame data from esp32 CAM
-struct FireData {
-    float FireProbability;
-    int X_Position;
-    int Y_Position;
+#if defined(CAMERA_MODEL_ESP_EYE)
+#define PWDN_GPIO_NUM    -1
+#define RESET_GPIO_NUM   -1
+#define XCLK_GPIO_NUM    4
+#define SIOD_GPIO_NUM    18
+#define SIOC_GPIO_NUM    23
+
+#define Y9_GPIO_NUM      36
+#define Y8_GPIO_NUM      37
+#define Y7_GPIO_NUM      38
+#define Y6_GPIO_NUM      39
+#define Y5_GPIO_NUM      35
+#define Y4_GPIO_NUM      14
+#define Y3_GPIO_NUM      13
+#define Y2_GPIO_NUM      34
+#define VSYNC_GPIO_NUM   5
+#define HREF_GPIO_NUM    27
+#define PCLK_GPIO_NUM    25
+
+#elif defined(CAMERA_MODEL_AI_THINKER)
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+#else
+#error "Camera model not selected"
+#endif
+
+// Image size
+#define EI_CAMERA_RAW_FRAME_BUFFER_COLS           320
+#define EI_CAMERA_RAW_FRAME_BUFFER_ROWS           240
+#define EI_CAMERA_FRAME_BYTE_SIZE                 3
+
+// Private variables
+static bool debug_nn = false; // Set this to true to see e.g. features generated from the raw signal
+static bool is_initialised = false;
+uint8_t *snapshot_buf; //points to the output of the capture
+
+static camera_config_t camera_config = {
+    .pin_pwdn = PWDN_GPIO_NUM,
+    .pin_reset = RESET_GPIO_NUM,
+    .pin_xclk = XCLK_GPIO_NUM,
+    .pin_sscb_sda = SIOD_GPIO_NUM,
+    .pin_sscb_scl = SIOC_GPIO_NUM,
+
+    .pin_d7 = Y9_GPIO_NUM,
+    .pin_d6 = Y8_GPIO_NUM,
+    .pin_d5 = Y7_GPIO_NUM,
+    .pin_d4 = Y6_GPIO_NUM,
+    .pin_d3 = Y5_GPIO_NUM,
+    .pin_d2 = Y4_GPIO_NUM,
+    .pin_d1 = Y3_GPIO_NUM,
+    .pin_d0 = Y2_GPIO_NUM,
+    .pin_vsync = VSYNC_GPIO_NUM,
+    .pin_href = HREF_GPIO_NUM,
+    .pin_pclk = PCLK_GPIO_NUM,
+
+    //XCLK 20MHz or 10MHz for OV2640 double FPS (Experimental)
+    .xclk_freq_hz = 20000000,
+    .ledc_timer = LEDC_TIMER_0,
+    .ledc_channel = LEDC_CHANNEL_0,
+
+    .pixel_format = PIXFORMAT_JPEG, //YUV422,GRAYSCALE,RGB565,JPEG
+    .frame_size = FRAMESIZE_QVGA,    //QQVGA-UXGA Do not use sizes above QVGA when not JPEG
+
+    .jpeg_quality = 12, //0-63 lower number means higher quality
+    .fb_count = 1,       //if more than one, i2s runs in continuous mode. Use only with JPEG
+    .fb_location = CAMERA_FB_IN_PSRAM,
+    .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
 };
 
-FireData parsedFireData;
-
-// Parse esp32 CAM data into readable values
-void Parse_Fire_Data(const String& input_data) {
-    if (input_data.length() == 21) {
-        parsedFireData.FireProbability = 0.0f;
-        parsedFireData.X_Position = 0;
-        parsedFireData.Y_Position = 0;
-    }
-    else {
-        String inputData(input_data);
-
-        int openParen = inputData.indexOf('(');
-        int closeParen = inputData.indexOf(')');
-
-        String floatValue = inputData.substring(openParen + 1, closeParen);
-        float fireValue = floatValue.toFloat();
-
-        int xStart = inputData.indexOf("x:") + 2;
-        int xEnd = inputData.indexOf(',', xStart);
-        int yStart = inputData.indexOf("y:") + 2;
-        int yEnd = inputData.indexOf(',', yStart);
-        int xValue = inputData.substring(xStart, xEnd).toInt();
-        int yValue = inputData.substring(yStart, yEnd).toInt();
-
-        parsedFireData.FireProbability = fireValue;
-        parsedFireData.X_Position = xValue;
-        parsedFireData.Y_Position = yValue;
-    }
-}
+// Function definitions
+bool ei_camera_init(void);
+void ei_camera_deinit(void);
+bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf) ;
 
 // Make output dataset smoother to make fire location easier
 void populateOutputMatrix() {
     float x_ratio = (float)(INPUT_SIZE - 1) / (OUTPUT_SIZE - 1);
     float y_ratio = (float)(INPUT_SIZE - 1) / (OUTPUT_SIZE - 1);
     float store_max = 0;
+    float check_for_negatives = 0;
 
     for (int y = 0; y < OUTPUT_SIZE; y++) {
         for (int x = 0; x < OUTPUT_SIZE; x++) {
@@ -80,6 +138,9 @@ void populateOutputMatrix() {
               findMax_x = x;
               findMax_y = y;
             }
+            if (output[y][x] < 0) {
+              check_for_negatives++;
+            }
         }
     }
     maxTemp = store_max;
@@ -89,75 +150,76 @@ void populateOutputMatrix() {
     else {
       thermalFireProbability = 1;
     }
+
+    // If there are any negative values in the output matrix, the thermal sensor is not properly connected to the I2C bus
+    if (check_for_negatives > 0) {
+      thermalFireProbability = 0;
+    }
 }
 
-// Estimate module's distance from the fire using triangulation
-// if this doesn't work, maybe using PID control to change drone position until fire is centered on both sensor matricies before ejection is a good idea
-float estimate_dist_from_fire(float *RGB_params, float *IR_params, float distance) {
-  // the param elements are arrays containing information on the RGB and IR cameras
-
-  // RGB_params
-  float RGB_FOV_x = RGB_params[0]; // horizontal FOV
-  float RGB_FOV_y = RGB_params[1]; // vertical FOV
-  float RGB_W = RGB_params[2]; // width of camera image (pixels)
-  float RGB_H = RGB_params[3]; // height of camera image (pixels)
-  float RGB_fire_center_x = RGB_params[4]; // center of fire x-value (pixels)
-  float RGB_fire_center_y = RGB_params[5]; // center of fire y-value (pixels)
-
-  // IR_params
-  float IR_FOV_x = IR_params[0]; // horizontal FOV
-  float IR_FOV_y = IR_params[1]; // vertical FOV
-  float IR_W = IR_params[2]; // width of camera image (pixels)
-  float IR_H = IR_params[3]; // height of camera image (pixels)
-  float IR_fire_center_x = IR_params[4]; // center of fire x-value (pixels)
-  float IR_fire_center_y = IR_params[5]; // center of fire y-value (pixels)
-
-  // Find RGB angles
-  float RGB_horiz = ((RGB_fire_center_x - RGB_W / 2) / (RGB_W / 2)) * (RGB_FOV_x / 2);
-  float RGB_vert = ((RGB_fire_center_y - RGB_H / 2) / (RGB_H / 2)) * (RGB_FOV_y / 2);
-
-  // Find IR angles
-  float IR_horiz = ((IR_fire_center_x - IR_W / 2) / (IR_W / 2)) * (IR_FOV_x / 2);
-  float IR_vert = ((IR_fire_center_y - IR_H / 2) / (IR_H / 2)) * (IR_FOV_y / 2);
-
-  // Convert to radians
-  RGB_horiz = M_PI * RGB_horiz / 180;
-  RGB_vert = M_PI * RGB_vert / 180;
-  IR_horiz = M_PI * IR_horiz / 180;
-  IR_vert = M_PI * IR_vert / 180;
-
-  // Horizontal distances
-  float x_RGB = distance * tan(RGB_horiz);
-  float x_IR = distance * tan(IR_horiz);
-
-  // Vertical distances
-  float y_RGB = distance * tan(RGB_vert);
-  float y_IR = distance * tan(IR_vert);
-
-  // Estimate distance to fire
-  float dist_to_fire = sqrt(pow((x_RGB - x_IR), 2) + pow((y_RGB - y_IR), 2) + pow(distance, 2));
-  return dist_to_fire;
-}
-
-void setup() {
+void setup()
+{
     Serial.begin(115200);
-    Serial.println(F("AMG88xx pixels"));
-
-    bool status;
     
-    // default settings
-    status = amg.begin();
+    //Initialize camera
+    Serial.println("Edge Impulse Inferencing Demo");
+    if (ei_camera_init() == false) {
+        ei_printf("Failed to initialize Camera!\r\n");
+    }
+    else {
+        ei_printf("Camera initialized\r\n");
+    }
+
+    // Begin I2C communication
+    Wire.begin(SDA_PIN, SCL_PIN);
+
+    // Initialize thermal array at 0x69
+    bool status;
+    status = amg.begin(0x69);
     if (!status) {
-        Serial.println("Could not find a valid AMG88xx sensor, check wiring!");
-        while (1);
+      Serial.println("Could not find a valid AMG88xx sensor, check wiring!");
     }
     delay(100); // let sensor boot up
+
+    ei_printf("\nStarting continious inference in 2 seconds...\n");
+    ei_sleep(2000);
 }
 
-void loop() {
-  // Read all the pixels from the AMG8833 sensor
-    amg.readPixels(pixels);
+void loop()
+{
+    if (ei_sleep(5) != EI_IMPULSE_OK) {
+        return;
+    }
 
+    snapshot_buf = (uint8_t*)malloc(EI_CAMERA_RAW_FRAME_BUFFER_COLS * EI_CAMERA_RAW_FRAME_BUFFER_ROWS * EI_CAMERA_FRAME_BYTE_SIZE);
+
+    // check if allocation was successful
+    if(snapshot_buf == nullptr) {
+        ei_printf("ERR: Failed to allocate snapshot buffer!\n");
+        return;
+    }
+
+    ei::signal_t signal;
+    signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
+    signal.get_data = &ei_camera_get_data;
+
+    if (ei_camera_capture((size_t)EI_CLASSIFIER_INPUT_WIDTH, (size_t)EI_CLASSIFIER_INPUT_HEIGHT, snapshot_buf) == false) {
+        ei_printf("Failed to capture image\r\n");
+        free(snapshot_buf);
+        return;
+    }
+
+    // Run the classifier
+    ei_impulse_result_t result = { 0 };
+
+    EI_IMPULSE_ERROR err = run_classifier(&signal, &result, debug_nn);
+    if (err != EI_IMPULSE_OK) {
+        ei_printf("ERR: Failed to run classifier (%d)\n", err);
+        return;
+    }
+
+     amg.readPixels(pixels);
+  
     // Populate the output matrix
     populateOutputMatrix();
 
@@ -169,48 +231,164 @@ void loop() {
         }
         Serial.println();
     }
+    delay(50);
 
-    // Display information about possible fire location
-    Serial.print("Highest Temperature: ");
-    Serial.println(maxTemp);
-    Serial.print("Pixel Location: ");
-    Serial.print("x = ");
-    Serial.print(findMax_x);
-    Serial.print(" ");
-    Serial.print("y = ");
-    Serial.print(findMax_y);
-    Serial.println();
-    Serial.print("Probability of Fire: ");
-    Serial.print(thermalFireProbability);
-    Serial.println();
-    Serial.println();
-    
-    delay(600); // Adjust delay so that 1 AMG8833 cycle = 1 ESP32 CAM TX Cycle
-    
-    if (Serial.available()) {
-        String data = Serial.readStringUntil('\n');
-        Parse_Fire_Data(data);
-        
-        Serial.print("Fire Probability: ");
-        Serial.println(parsedFireData.FireProbability);
-        Serial.print("X Location: ");
-        Serial.println(parsedFireData.X_Position);
-        Serial.print("Y Location: ");
-        Serial.println(parsedFireData.Y_Position);
+    // Print individual probabilities and combined probability
+    ei_printf("Fire Probability: ");
+    Serial.println(fireProbability);
 
-        Serial.println();
-        Serial.print("Combined Probability: ");
-        Serial.println(0.3 * thermalFireProbability + 0.7 * parsedFireData.FireProbability);
+    ei_printf("Thermal Probability: ");
+    Serial.println(thermalFireProbability);
 
-        float RGB_params[6] = {68, 50, RGB_res_X, RGB_res_Y, parsedFireData.X_Position, parsedFireData.Y_Position};
-        float IR_params[6] = {60, 60, IR_res_X, IR_res_Y, findMax_x, findMax_y};
-        float dist_to_fire = estimate_dist_from_fire(RGB_params, IR_params, seperation_distance); // The accuracy of this still needs to be tested!!!
-        Serial.print("Distance from Fire: ");
-        Serial.println(dist_to_fire);
-        
-        // if ((0.3 * thermalFireProbability + 0.7 * parsedFireData.FireProbability) > 0.8) { // Fire Confidence Threshold = 0.8
-            // Send control signals to alert external device of fire
-        // }
-        
+    ei_printf("Combined Probability: ");
+    Serial.println(fireProbability * thermalFireProbability);
+
+    // --> if the combined probability > threshold --> second control commands to drone
+
+#if EI_CLASSIFIER_OBJECT_DETECTION == 1
+    bool bb_found = result.bounding_boxes[0].value > 0;
+    for (size_t ix = 0; ix < result.bounding_boxes_count; ix++) {
+        auto bb = result.bounding_boxes[ix];
+        if (bb.value == 0) {
+            continue;
+        }
+        ei_printf("    %s (%f) [ x: %u, y: %u, width: %u, height: %u ]\n", bb.label, bb.value, bb.x, bb.y, bb.width, bb.height);
+        fireProbability = bb.value;
     }
+    if (!bb_found) {
+        //ei_printf("    No objects found\n");
+        Serial.println("    No objects found");
+        fireProbability = 0;
+    }
+#else
+    for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+        //ei_printf("    %s: %.5f\n", result.classification[ix].label,
+                                  //  result.classification[ix].value);
+        Serial.println(result.classification[ix].label);
+        Serial.println(result.classification[ix].value);
+    }
+#endif
+
+#if EI_CLASSIFIER_HAS_ANOMALY == 1
+        ei_printf("    anomaly score: %.3f\n", result.anomaly);
+#endif
+
+    free(snapshot_buf);
 }
+
+bool ei_camera_init(void) {
+
+    if (is_initialised) return true;
+
+#if defined(CAMERA_MODEL_ESP_EYE)
+  pinMode(13, INPUT_PULLUP);
+  pinMode(14, INPUT_PULLUP);
+#endif
+
+    //initialize the camera
+    esp_err_t err = esp_camera_init(&camera_config);
+    if (err != ESP_OK) {
+      Serial.printf("Camera init failed with error 0x%x\n", err);
+      return false;
+    }
+
+    sensor_t * s = esp_camera_sensor_get();
+    // initial sensors are flipped vertically and colors are a bit saturated
+    if (s->id.PID == OV3660_PID) {
+      s->set_vflip(s, 1); // flip it back
+      s->set_brightness(s, 1); // up the brightness just a bit
+      s->set_saturation(s, 0); // lower the saturation
+    }
+
+#if defined(CAMERA_MODEL_M5STACK_WIDE)
+    s->set_vflip(s, 1);
+    s->set_hmirror(s, 1);
+#elif defined(CAMERA_MODEL_ESP_EYE)
+    s->set_vflip(s, 1);
+    s->set_hmirror(s, 1);
+    s->set_awb_gain(s, 1);
+#endif
+
+    is_initialised = true;
+    return true;
+}
+
+void ei_camera_deinit(void) {
+
+    //deinitialize the camera
+    esp_err_t err = esp_camera_deinit();
+
+    if (err != ESP_OK)
+    {
+        ei_printf("Camera deinit failed\n");
+        return;
+    }
+
+    is_initialised = false;
+    return;
+}
+
+bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf) {
+    bool do_resize = false;
+
+    if (!is_initialised) {
+        ei_printf("ERR: Camera is not initialized\r\n");
+        return false;
+    }
+
+    camera_fb_t *fb = esp_camera_fb_get();
+
+    if (!fb) {
+        ei_printf("Camera capture failed\n");
+        return false;
+    }
+
+   bool converted = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf);
+
+   esp_camera_fb_return(fb);
+
+   if(!converted){
+       ei_printf("Conversion failed\n");
+       return false;
+   }
+
+    if ((img_width != EI_CAMERA_RAW_FRAME_BUFFER_COLS)
+        || (img_height != EI_CAMERA_RAW_FRAME_BUFFER_ROWS)) {
+        do_resize = true;
+    }
+
+    if (do_resize) {
+        ei::image::processing::crop_and_interpolate_rgb888(
+        out_buf,
+        EI_CAMERA_RAW_FRAME_BUFFER_COLS,
+        EI_CAMERA_RAW_FRAME_BUFFER_ROWS,
+        out_buf,
+        img_width,
+        img_height);
+    }
+
+    return true;
+}
+
+static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr)
+{
+    // we already have a RGB888 buffer, so recalculate offset into pixel index
+    size_t pixel_ix = offset * 3;
+    size_t pixels_left = length;
+    size_t out_ptr_ix = 0;
+
+    while (pixels_left != 0) {
+        out_ptr[out_ptr_ix] = (snapshot_buf[pixel_ix] << 16) + (snapshot_buf[pixel_ix + 1] << 8) + snapshot_buf[pixel_ix + 2];
+
+        // go to the next pixel
+        out_ptr_ix++;
+        pixel_ix+=3;
+        pixels_left--;
+    }
+    // and done!
+    return 0;
+}
+
+#if !defined(EI_CLASSIFIER_SENSOR) || EI_CLASSIFIER_SENSOR != EI_CLASSIFIER_SENSOR_CAMERA
+#error "Invalid model for current sensor"
+#endif
