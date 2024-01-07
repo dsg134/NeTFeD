@@ -6,13 +6,14 @@
 #include <Wire.h>
 #include <Adafruit_AMG88xx.h>
 
+// Define I2C bus
 #define SDA_PIN 13 // Define your SDA pin
 #define SCL_PIN 2 // Define your SCL pin
 
 Adafruit_AMG88xx amg;
 
 const int INPUT_SIZE = 8;
-const int OUTPUT_SIZE = 12; // Interpolate data by a factor of: OUTPUT_SIZE / INPUT_SIZE --> This number is limited with however much memory the MCU has
+const int OUTPUT_SIZE = 16; // Interpolate data by a factor of: OUTPUT_SIZE / INPUT_SIZE --> This number is limited with however much memory the MCU has
 
 // Pixel grid properties
 float pixels[AMG88xx_PIXEL_ARRAY_SIZE];
@@ -22,7 +23,20 @@ float output[OUTPUT_SIZE][OUTPUT_SIZE];
 float maxTemp;
 float findMax_x;
 float findMax_y;
-float fireProbability;
+
+float NetVisualFireProbability;
+float NetThermalFireProbability;
+float NetFireProbability;
+float DistanceToFire;
+
+// Storage for recovered flame data from second esp32 CAM
+struct FireData {
+    float FireProbability;
+    int X_Position;
+    int Y_Position;
+};
+
+FireData parsedFireData;
 
 // Probability of detecting fire via thermal imaging
 float thermalFireProbability;
@@ -157,12 +171,70 @@ void populateOutputMatrix() {
     }
 }
 
+// Parse esp32 CAM data into readable values
+void Parse_Fire_Data(const String& input_data) {
+    if (input_data.length() < 60) { // serial fire data should be >60 chars
+        parsedFireData.FireProbability = 0.0f;
+        parsedFireData.X_Position = 0;
+        parsedFireData.Y_Position = 0;
+    }
+    else {
+        String inputData(input_data);
+
+        int openParen = inputData.indexOf('(');
+        int closeParen = inputData.indexOf(')');
+
+        String floatValue = inputData.substring(openParen + 1, closeParen);
+        float fireValue = floatValue.toFloat();
+
+        int xStart = inputData.indexOf("x:") + 2;
+        int xEnd = inputData.indexOf(',', xStart);
+        int yStart = inputData.indexOf("y:") + 2;
+        int yEnd = inputData.indexOf(',', yStart);
+        int xValue = inputData.substring(xStart, xEnd).toInt();
+        int yValue = inputData.substring(yStart, yEnd).toInt();
+
+        parsedFireData.FireProbability = fireValue;
+        parsedFireData.X_Position = xValue;
+        parsedFireData.Y_Position = yValue;
+    }
+}
+
+// Estimate distance between stereo cameras and fire
+float estimate_dist_from_fire(float *cam_1_params, float *cam_2_params) {
+  // the param elements are arrays containing information on the stereo cameras
+  
+  // cam 1 params
+  float cam_1_BB_x = cam_1_params[0]; // bounding box (x coord)
+  float cam_1_BB_y = cam_1_params[1]; // bounding box (y coord)
+
+  // cam 2 params
+  float cam_2_BB_x = cam_2_params[0]; // bounding box (x coord)
+  float cam_2_BB_y = cam_2_params[1]; // bounding box (y coord)
+
+  // Intrinsic camera parameters from calibration (cam 1 = cam 2) + stereo geometry
+  // All values are measured in millimeters (mm)
+  float focal_x = 975.9491;
+  float focal_y = 975.3356;
+  float princip_x = 506.0773;
+  float princip_y = 378.6833;
+  float seperation = 77.47; // distance between cam 1 and cam 2
+
+  // Compute the x, y, and z coords of the fire relative to cam 1 as the origin
+  float disparity = cam_1_BB_x - cam_2_BB_x;
+  float fire_x = seperation * (cam_1_BB_x - princip_x) / disparity;
+  float fire_y = seperation * focal_x * (cam_1_BB_y - princip_y) / (focal_y * disparity);
+  float fire_z = seperation * focal_x / disparity;
+
+  float dist_to_fire = sqrt(pow(fire_x, 2) + pow(fire_y, 2) + pow(fire_z, 2));
+  return dist_to_fire;
+}
+
 void setup()
 {
     Serial.begin(115200);
     
     //Initialize camera
-    Serial.println("Edge Impulse Inferencing Demo");
     if (ei_camera_init() == false) {
         ei_printf("Failed to initialize Camera!\r\n");
     }
@@ -181,7 +253,7 @@ void setup()
     }
     delay(100); // let sensor boot up
 
-    ei_printf("\nStarting continious inference in 2 seconds...\n");
+    // ei_printf("\nStarting continious inference in 2 seconds...\n");
     ei_sleep(2000);
 }
 
@@ -224,26 +296,33 @@ void loop()
     populateOutputMatrix();
 
     // Print the output matrix for debugging
-    for (int y = 0; y < OUTPUT_SIZE; y++) {
+    /*for (int y = 0; y < OUTPUT_SIZE; y++) {
         for (int x = 0; x < OUTPUT_SIZE; x++) {
             Serial.print(output[y][x]);
             Serial.print("\t");
         }
         Serial.println();
-    }
+    }*/
+
+    //Print fire data for drone control
+    Serial.print("Visual Fire Probability: ");
+    Serial.println(NetVisualFireProbability);
+
+    Serial.print("Thermal Fire Probability: ");
+    Serial.println(NetThermalFireProbability);
+
+    Serial.print("Measured Temperature: ");
+    Serial.println(maxTemp);
+    
+    Serial.print("Net Fire Probability: ");
+    Serial.println(NetFireProbability);
+
+    Serial.print("Distance to Fire: ");
+    Serial.println(DistanceToFire);
+
+    Serial.println("BREAK"); // Splits fire data samples
+    
     delay(50);
-
-    // Print individual probabilities and combined probability
-    ei_printf("Fire Probability: ");
-    Serial.println(fireProbability);
-
-    ei_printf("Thermal Probability: ");
-    Serial.println(thermalFireProbability);
-
-    ei_printf("Combined Probability: ");
-    Serial.println(fireProbability * thermalFireProbability);
-
-    // --> if the combined probability > threshold --> second control commands to drone
 
 #if EI_CLASSIFIER_OBJECT_DETECTION == 1
     bool bb_found = result.bounding_boxes[0].value > 0;
@@ -252,18 +331,77 @@ void loop()
         if (bb.value == 0) {
             continue;
         }
-        ei_printf("    %s (%f) [ x: %u, y: %u, width: %u, height: %u ]\n", bb.label, bb.value, bb.x, bb.y, bb.width, bb.height);
-        fireProbability = bb.value;
+        // ei_printf("    %s (%f) [ x: %u, y: %u, width: %u, height: %u ]\n", bb.label, bb.value, bb.x, bb.y, bb.width, bb.height);
+
+        // Use for serial connection debugging between ESP32s
+        /*
+        Serial.print("First Fire Probability: ");
+        Serial.println(bb.value);
+        Serial.print("First X Location: ");
+        Serial.println(bb.x);
+        Serial.print("First Y Location: ");
+        Serial.println(bb.y);
+        */
+
+        if (Serial.available()) {
+          String data = Serial.readStringUntil('\n');
+          Parse_Fire_Data(data);
+
+          // Use for serial connection debugging between ESP32s
+          /*
+          Serial.print("Second Fire Probability: ");
+          Serial.println(parsedFireData.FireProbability);
+          Serial.print("Second X Location: ");
+          Serial.println(parsedFireData.X_Position);
+          Serial.print("Second Y Location: ");
+          Serial.println(parsedFireData.Y_Position);
+          */
+        }
+
+        // Combine data from both ESP32 CAM boards
+        float avg_FireProbability = (bb.value + parsedFireData.FireProbability) / 2;
+
+        float cam_1_params[2] = {bb.x, bb.y};
+        float cam_2_params[2] = {parsedFireData.X_Position, parsedFireData.Y_Position};
+        float distance_to_fire = estimate_dist_from_fire(cam_1_params, cam_2_params);
+        DistanceToFire = distance_to_fire;
+
+        NetVisualFireProbability = avg_FireProbability;
+        NetThermalFireProbability = thermalFireProbability;
+
+        float net_probability_of_fire = avg_FireProbability * thermalFireProbability;
+        NetFireProbability = net_probability_of_fire;
+
+        /*
+        // Fire Data
+        Serial.print("Fire Probability: ");
+        Serial.println(avg_FireProbability);
+        Serial.print("Thermal Probability: ");
+        Serial.println(thermalFireProbability);
+        Serial.print("Maximum Temperature: ");
+        Serial.println(maxTemp);
+
+        // Fire Tracking
+        Serial.print("Net Probability of Fire: ");
+        Serial.println(net_probability_of_fire);
+        Serial.print("Distance to Fire: ");
+        Serial.println(distance_to_fire);
+        
+        Serial.println("BREAK");
+        */
     }
     if (!bb_found) {
         //ei_printf("    No objects found\n");
-        Serial.println("    No objects found");
-        fireProbability = 0;
+        //Serial.println("    No objects found");
+        NetVisualFireProbability = 0;
+        NetThermalFireProbability = 0;
+        NetFireProbability = 0;
+        DistanceToFire = 0;
     }
 #else
     for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-        //ei_printf("    %s: %.5f\n", result.classification[ix].label,
-                                  //  result.classification[ix].value);
+        ei_printf("    %s: %.5f\n", result.classification[ix].label,
+                                    result.classification[ix].value);
         Serial.println(result.classification[ix].label);
         Serial.println(result.classification[ix].value);
     }
