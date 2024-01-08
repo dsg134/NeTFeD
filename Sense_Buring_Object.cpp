@@ -38,6 +38,15 @@ struct FireData {
 
 FireData parsedFireData;
 
+// Storage for fire coordinates upon detection
+struct FireCoords {
+  float X;
+  float Y;
+  float Z;
+};
+
+FireCoords coords;
+
 // Probability of detecting fire via thermal imaging
 float thermalFireProbability;
 const float FIRE_THRESHOLD = 40;
@@ -201,7 +210,7 @@ void Parse_Fire_Data(const String& input_data) {
 }
 
 // Estimate distance between stereo cameras and fire
-float estimate_dist_from_fire(float *cam_1_params, float *cam_2_params) {
+float* estimate_dist_from_fire(float *cam_1_params, float *cam_2_params) {
   // the param elements are arrays containing information on the stereo cameras
   
   // cam 1 params
@@ -225,9 +234,15 @@ float estimate_dist_from_fire(float *cam_1_params, float *cam_2_params) {
   float fire_x = seperation * (cam_1_BB_x - princip_x) / disparity;
   float fire_y = seperation * focal_x * (cam_1_BB_y - princip_y) / (focal_y * disparity);
   float fire_z = seperation * focal_x / disparity;
-
   float dist_to_fire = sqrt(pow(fire_x, 2) + pow(fire_y, 2) + pow(fire_z, 2));
-  return dist_to_fire;
+
+  float* fire_position = new float[4];
+  fire_position[0] = fire_x;
+  fire_position[1] = fire_y;
+  fire_position[2] = fire_z;
+  fire_position[3] = dist_to_fire;
+
+  return fire_position;
 }
 
 void setup()
@@ -317,6 +332,15 @@ void loop()
     Serial.print("Net Fire Probability: ");
     Serial.println(NetFireProbability);
 
+    Serial.print("Fire X Position: ");
+    Serial.println(coords.X);
+
+    Serial.print("Fire Y Position: ");
+    Serial.println(coords.Y);
+
+    Serial.print("Fire Z Position: ");
+    Serial.println(coords.Z);
+
     Serial.print("Distance to Fire: ");
     Serial.println(DistanceToFire);
 
@@ -363,8 +387,14 @@ void loop()
 
         float cam_1_params[2] = {bb.x, bb.y};
         float cam_2_params[2] = {parsedFireData.X_Position, parsedFireData.Y_Position};
-        float distance_to_fire = estimate_dist_from_fire(cam_1_params, cam_2_params);
-        DistanceToFire = distance_to_fire;
+        float* fire_info = estimate_dist_from_fire(cam_1_params, cam_2_params);
+
+        coords.X = fire_info[0];
+        coords.Y = fire_info[1];
+        coords.Z = fire_info[2];
+        DistanceToFire = fire_info[3];
+
+        delete[] fire_info;
 
         NetVisualFireProbability = avg_FireProbability;
         NetThermalFireProbability = thermalFireProbability;
